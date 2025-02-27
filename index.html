@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Tetris AnyWhere</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.87.0/dist/phaser.js"></script>
+  <style>
+    body { margin: 0; }
+    canvas { display: block; margin: auto; }
+    /* Simple styling for mobile control buttons */
+    .touch-controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 10px;
+      z-index: 1000;
+    }
+    .touch-controls button {
+      font-size: 18px;
+      padding: 10px 20px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Mobile touch controls -->
+  <div class="touch-controls" id="touchControls" style="display:none;">
+    <button id="leftBtn">←</button>
+    <button id="rotateBtn">⟳</button>
+    <button id="rightBtn">→</button>
+    <button id="dropBtn">↓</button>
+  </div>
+
+  <script>
+    // Layout constants
+    const COLS = 10, ROWS = 20, BLOCK_SIZE = 30;
+    const HEADER_HEIGHT = 50;   // space at the top for scores
+    const MARGIN_LEFT = 10;     // shift board to the right so outline is fully visible
+    const BOTTOM_MARGIN = 50;   // extra space below board
+
+    const BOARD_WIDTH = COLS * BLOCK_SIZE;
+    const BOARD_HEIGHT = ROWS * BLOCK_SIZE;
+
+    // Soft drop intervals (in ms)
+    const normalDropInterval = 350;  // default fall speed
+    const fastDropInterval = 50;    // faster fall speed when Down arrow is held
+
+    // TETROMINOES in 4x4 bounding boxes:
+    // (prevents "I" piece from shrinking on rotation)
+    const TETROMINOES = {
+      I: {
+        shape: [
+          [0, 0, 0, 0],
+          [1, 1, 1, 1],
+          [0, 0, 0, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0x00ffff
+      },
+      J: {
+        shape: [
+          [0, 0, 0, 0],
+          [1, 0, 0, 0],
+          [1, 1, 1, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0x0000ff
+      },
+      L: {
+        shape: [
+          [0, 0, 0, 0],
+          [0, 0, 1, 0],
+          [1, 1, 1, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0xffa500
+      },
+      O: {
+        shape: [
+          [0, 0, 0, 0],
+          [0, 1, 1, 0],
+          [0, 1, 1, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0xffff00
+      },
+      S: {
+        shape: [
+          [0, 0, 0, 0],
+          [0, 1, 1, 0],
+          [1, 1, 0, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0x00ff00
+      },
+      T: {
+        shape: [
+          [0, 0, 0, 0],
+          [0, 1, 0, 0],
+          [1, 1, 1, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0xff00ff
+      },
+      Z: {
+        shape: [
+          [0, 0, 0, 0],
+          [1, 1, 0, 0],
+          [0, 1, 1, 0],
+          [0, 0, 0, 0]
+        ],
+        color: 0xff0000
+      }
+    };
+
+    // Phaser config
+    const config = {
+      type: Phaser.AUTO,
+      backgroundColor: '#222',
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: BOARD_WIDTH + 150 + MARGIN_LEFT,
+        height: BOARD_HEIGHT + HEADER_HEIGHT + BOTTOM_MARGIN
+      },
+      scene: {
+        preload: preload,
+        create: create,
+        update: update
+      }
+    };
+
+    let game = new Phaser.Game(config);
+
+    // Global variables
+    let board, activeTetromino, nextTetromino;
+    let timer = 0;
+    let score = 0, scoreText, highScoreText;
+    let blockGroup;
+
+    // Track if Down arrow is held
+    let isDownPressed = false;
+
+    // Create an empty board
+    function createBoard() {
+      let grid = [];
+      for (let r = 0; r < ROWS; r++) {
+        grid[r] = [];
+        for (let c = 0; c < COLS; c++) {
+          grid[r][c] = 0;
+        }
+      }
+      return grid;
+    }
+
+    // Pick a random tetromino
+    function randomTetrominoKey() {
+      const keys = Object.keys(TETROMINOES);
+      return keys[Math.floor(Math.random() * keys.length)];
+    }
+
+    // Rotate matrix clockwise
+    function rotate(matrix) {
+      const N = matrix.length; // always 4 now
+      let result = [];
+      for (let i = 0; i < N; i++) {
+        result[i] = [];
+        for (let j = 0; j < N; j++) {
+          result[i][j] = matrix[N - j - 1][i];
+        }
+      }
+      return result;
+    }
+
+    // Check if moving or rotating is valid
+    function isValidMove(shape, offsetX, offsetY) {
+      for (let y = 0; y < shape.length; y++) {
+        for (let x = 0; x < shape[y].length; x++) {
+          if (shape[y][x]) {
+            let newX = activeTetromino.x + x + offsetX;
+            let newY = activeTetromino.y + y + offsetY;
+            // Check boundaries
+            if (newX < 0 || newX >= COLS || newY >= ROWS) return false;
+            // Check collision with existing blocks
+            if (newY >= 0 && board[newY][newX]) return false;
+          }
+        }
+      }
+      return true;
+    }
+
+    // Lock tetromino into the board
+    function mergeTetromino() {
+      activeTetromino.shape.forEach((row, y) => {
+        row.forEach((value, x) => {
+          if (value) {
+            if (activeTetromino.y + y < 0) {
+              // Game Over
+              gameOver();
+              return;
+            }
+            board[activeTetromino.y + y][activeTetromino.x + x] = activeTetromino.color;
+          }
+        });
+      });
+      clearLines();
+      spawnTetromino();
+    }
+
+    // Clear completed lines
+    function clearLines() {
+      let linesCleared = 0;
+      for (let y = ROWS - 1; y >= 0; y--) {
+        if (board[y].every(cell => cell !== 0)) {
+          board.splice(y, 1);
+          board.unshift(new Array(COLS).fill(0));
+          linesCleared++;
+          y++;
+        }
+      }
+      if (linesCleared > 0) {
+        score += linesCleared * 100;
+        updateScoreText();
+      }
+    }
+
+    // Spawn new tetromino
+    function spawnTetromino() {
+      if (!nextTetromino) {
+        activeTetromino = generateTetromino(randomTetrominoKey());
+        nextTetromino = generateTetromino(randomTetrominoKey());
+      } else {
+        activeTetromino = nextTetromino;
+        activeTetromino.x = Math.floor((COLS - activeTetromino.shape[0].length) / 2);
+        activeTetromino.y = -activeTetromino.shape.length;
+        nextTetromino = generateTetromino(randomTetrominoKey());
+      }
+      drawNextTetromino();
+    }
+
+    // Create a tetromino object
+    function generateTetromino(key) {
+      const data = TETROMINOES[key];
+      return {
+        key: key,
+        shape: JSON.parse(JSON.stringify(data.shape)), // copy so we don't mutate the original
+        color: data.color,
+        x: Math.floor((COLS - data.shape[0].length) / 2),
+        y: -data.shape.length
+      };
+    }
+
+    // Draw board, outline, and tetrominoes
+    function drawBoard(scene) {
+      // Clear old blocks
+      if (blockGroup) blockGroup.clear(true, true);
+      blockGroup = scene.add.group();
+
+      // Draw outline only (no fill), offset by MARGIN_LEFT
+      let outline = scene.add.rectangle(
+        MARGIN_LEFT + BOARD_WIDTH / 2,
+        HEADER_HEIGHT + BOARD_HEIGHT / 2,
+        BOARD_WIDTH,
+        BOARD_HEIGHT
+      );
+      outline.setFillStyle(0xffffff, 0);   // transparent fill
+      outline.setStrokeStyle(2, 0xffffff); // white outline
+
+      // Draw existing board blocks
+      for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          if (board[y][x]) {
+            let block = scene.add.rectangle(
+              MARGIN_LEFT + x * BLOCK_SIZE + BLOCK_SIZE / 2,
+              HEADER_HEIGHT + y * BLOCK_SIZE + BLOCK_SIZE / 2,
+              BLOCK_SIZE - 2,
+              BLOCK_SIZE - 2,
+              board[y][x]
+            );
+            blockGroup.add(block);
+          }
+        }
+      }
+
+      // Draw active tetromino
+      activeTetromino.shape.forEach((row, yy) => {
+        row.forEach((value, xx) => {
+          if (value) {
+            let drawX = MARGIN_LEFT + (activeTetromino.x + xx) * BLOCK_SIZE + BLOCK_SIZE / 2;
+            let drawY = HEADER_HEIGHT + (activeTetromino.y + yy) * BLOCK_SIZE + BLOCK_SIZE / 2;
+            let block = scene.add.rectangle(
+              drawX,
+              drawY,
+              BLOCK_SIZE - 2,
+              BLOCK_SIZE - 2,
+              activeTetromino.color
+            );
+            blockGroup.add(block);
+          }
+        });
+      });
+    }
+
+    // Draw next tetromino preview
+    function drawNextTetromino() {
+      let scene = game.scene.keys['default'];
+      if (scene.nextPreview) scene.nextPreview.destroy();
+      // Place the preview to the right of the board
+      scene.nextPreview = scene.add.container(MARGIN_LEFT + BOARD_WIDTH + 25, HEADER_HEIGHT + 50);
+      nextTetromino.shape.forEach((row, y) => {
+        row.forEach((value, x) => {
+          if (value) {
+            let block = scene.add.rectangle(
+              x * BLOCK_SIZE / 2,
+              y * BLOCK_SIZE / 2,
+              BLOCK_SIZE / 2 - 2,
+              BLOCK_SIZE / 2 - 2,
+              nextTetromino.color
+            );
+            scene.nextPreview.add(block);
+          }
+        });
+      });
+    }
+
+    // Update score text
+    function updateScoreText() {
+      scoreText.setText("Score: " + score);
+      highScoreText.setText("Top: " + getTopScore());
+    }
+
+    // Get top score from localStorage
+    function getTopScore() {
+      let topScores = JSON.parse(localStorage.getItem("tetrisTopScores") || "[]");
+      return topScores.length > 0 ? topScores[0] : 0;
+    }
+
+    // Save score to localStorage
+    function saveScore(newScore) {
+      let topScores = JSON.parse(localStorage.getItem("tetrisTopScores") || "[]");
+      topScores.push(newScore);
+      topScores.sort((a, b) => b - a);
+      topScores = topScores.slice(0, 3);
+      localStorage.setItem("tetrisTopScores", JSON.stringify(topScores));
+    }
+
+    // Game Over
+    function gameOver() {
+  saveScore(score);
+
+  // Get the main scene so we can add overlay elements
+  let scene = game.scene.keys['default'];
+  let w = config.scale.width;
+  let h = config.scale.height;
+
+  // Dark overlay (slightly transparent)
+  let overlay = scene.add.rectangle(
+    w / 2,          // center X
+    h / 2,          // center Y
+    w,              // width
+    h,              // height
+    0x000000,       // color (black)
+    0.5             // alpha (50% transparent)
+  );
+  overlay.setDepth(9999);
+
+  // Text to show the final score
+  let goText = scene.add.text(
+    w / 2,
+    h / 2,
+    `Game Over!\nScore: ${score}\n\nTap to continue...`,
+    {
+      font: '24px Arial',
+      fill: '#fff',
+      align: 'center'
+    }
+  )
+  .setOrigin(0.5)
+  .setDepth(10000);
+
+  // Wait for the player's tap/click
+  scene.input.once('pointerdown', () => {
+    // Remove overlay and text
+    overlay.destroy();
+    goText.destroy();
+
+    // Reset game state
+    score = 0;
+    board = createBoard();
+    spawnTetromino();
+    updateScoreText();
+  });
+}
+
+
+    // Phaser scene: preload
+    function preload() {
+      // Preload any assets if needed
+    }
+
+    // Phaser scene: create
+    function create() {
+      board = createBoard();
+      spawnTetromino();
+
+      // Score texts at top
+      scoreText = this.add.text(10, 10, "Score: 0", { font: "20px Arial", fill: "#fff" });
+      highScoreText = this.add.text(MARGIN_LEFT + BOARD_WIDTH - 80, 10, "Top: " + getTopScore(), {
+        font: "20px Arial",
+        fill: "#fff"
+      });
+
+      // Horizontal line under the header (across entire width)
+      this.add.line(
+        0, HEADER_HEIGHT,
+        config.scale.width, HEADER_HEIGHT,
+        0xffffff
+      ).setOrigin(0);
+
+      // Capture arrow keys to prevent scrolling
+      this.input.keyboard.on('keydown', (event) => {
+        // If arrow keys, block default browser behavior
+        if ([37, 38, 39, 40].includes(event.keyCode)) {
+          event.preventDefault();
+        }
+        handleKeyDown(event);
+      });
+      this.input.keyboard.on('keyup', (event) => {
+        handleKeyUp(event);
+      });
+
+        // Show mobile controls if touch is supported
+  if (this.sys.game.device.input.touch) {
+    document.getElementById("touchControls").style.display = "flex";
+
+    // Left, rotate, right remain single-tap:
+    document.getElementById("leftBtn").addEventListener("click", () =>
+      handleKeyDown({ keyCode: Phaser.Input.Keyboard.KeyCodes.LEFT })
+    );
+    document.getElementById("rotateBtn").addEventListener("click", () =>
+      handleKeyDown({ keyCode: Phaser.Input.Keyboard.KeyCodes.UP })
+    );
+    document.getElementById("rightBtn").addEventListener("click", () =>
+      handleKeyDown({ keyCode: Phaser.Input.Keyboard.KeyCodes.RIGHT })
+    );
+
+    // For continuous fast drop, simulate "key down" on touchstart
+    // and "key up" on touchend:
+    document.getElementById("dropBtn").addEventListener("touchstart", () => {
+      handleKeyDown({ keyCode: Phaser.Input.Keyboard.KeyCodes.DOWN });
+    });
+    document.getElementById("dropBtn").addEventListener("touchend", () => {
+      handleKeyUp({ keyCode: Phaser.Input.Keyboard.KeyCodes.DOWN });
+    });
+      }
+    }
+
+    // Handle key DOWN events
+    function handleKeyDown(event) {
+      if (!activeTetromino) return;
+
+      if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.LEFT) {
+        // Move left
+        if (isValidMove(activeTetromino.shape, -1, 0)) {
+          activeTetromino.x--;
+          drawBoard(game.scene.keys['default']);
+        }
+      }
+      else if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.RIGHT) {
+        // Move right
+        if (isValidMove(activeTetromino.shape, 1, 0)) {
+          activeTetromino.x++;
+          drawBoard(game.scene.keys['default']);
+        }
+      }
+      else if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.UP) {
+        // Rotate
+        let rotated = rotate(activeTetromino.shape);
+        if (isValidMove(rotated, 0, 0)) {
+          activeTetromino.shape = rotated;
+          drawBoard(game.scene.keys['default']);
+        }
+      }
+      else if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.DOWN) {
+        // Start fast drop if on desktop
+        // (On mobile, each click will do a single step below.)
+        isDownPressed = true;
+
+        // For a single tap on desktop or mobile, move down 1 step if possible
+        if (isValidMove(activeTetromino.shape, 0, 1)) {
+          activeTetromino.y++;
+          score += 1; // reward for soft drop
+          drawBoard(game.scene.keys['default']);
+        } else {
+          // If we can't move down, lock it
+          mergeTetromino();
+          drawBoard(game.scene.keys['default']);
+        }
+      }
+
+      updateScoreText();
+    }
+
+    // Handle key UP events
+    function handleKeyUp(event) {
+      // If the Down arrow is released, return to normal speed
+      if (event.keyCode === Phaser.Input.Keyboard.KeyCodes.DOWN) {
+        isDownPressed = false;
+      }
+    }
+
+    // Phaser scene: update
+    function update(time, delta) {
+      // Decide which interval to use
+      const currentInterval = isDownPressed ? fastDropInterval : normalDropInterval;
+
+      timer += delta;
+      if (timer > currentInterval) {
+        timer = 0;
+        if (isValidMove(activeTetromino.shape, 0, 1)) {
+          activeTetromino.y++;
+        } else {
+          mergeTetromino();
+        }
+        drawBoard(this);
+      }
+    }
+  </script>
+</body>
+</html>
